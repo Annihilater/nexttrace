@@ -2,17 +2,17 @@ package printer
 
 import (
 	"fmt"
+	"github.com/nxtrace/NTrace-core/util"
 	"net"
 	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
-	"github.com/xgadget-lab/nexttrace/trace"
+	"github.com/nxtrace/NTrace-core/trace"
 )
 
 func RealtimePrinter(res *trace.Result, ttl int) {
 	fmt.Printf("%s  ", color.New(color.FgHiYellow, color.Bold).Sprintf("%-2d", ttl+1))
-
 	// 去重
 	var latestIP string
 	tmpMap := make(map[string][]string)
@@ -51,13 +51,25 @@ func RealtimePrinter(res *trace.Result, ttl int) {
 			fmt.Printf("%4s", "")
 		}
 		if net.ParseIP(ip).To4() == nil {
-			fmt.Fprintf(color.Output, "%s",
-				color.New(color.FgWhite, color.Bold).Sprintf("%-25s", ip),
-			)
+			if util.EnableHidDstIP == "" || ip != util.DestIP {
+				fmt.Fprintf(color.Output, "%s",
+					color.New(color.FgWhite, color.Bold).Sprintf("%-25s", ip),
+				)
+			} else {
+				fmt.Fprintf(color.Output, "%s",
+					color.New(color.FgWhite, color.Bold).Sprintf("%-25s", util.HideIPPart(ip)),
+				)
+			}
 		} else {
-			fmt.Fprintf(color.Output, "%s",
-				color.New(color.FgWhite, color.Bold).Sprintf("%-15s", ip),
-			)
+			if util.EnableHidDstIP == "" || ip != util.DestIP {
+				fmt.Fprintf(color.Output, "%s",
+					color.New(color.FgWhite, color.Bold).Sprintf("%-15s", ip),
+				)
+			} else {
+				fmt.Fprintf(color.Output, "%s",
+					color.New(color.FgWhite, color.Bold).Sprintf("%-15s", util.HideIPPart(ip)),
+				)
+			}
 		}
 
 		i, _ := strconv.Atoi(v[0])
@@ -79,6 +91,12 @@ func RealtimePrinter(res *trace.Result, ttl int) {
 				fallthrough
 			case res.Hops[ttl][i].Geo.Asnumber == "23764":
 				fallthrough
+			case res.Hops[ttl][i].Geo.Whois == "CTG-CN":
+				fallthrough
+			case res.Hops[ttl][i].Geo.Whois == "[CNC-BACKBONE]":
+				fallthrough
+			case res.Hops[ttl][i].Geo.Whois == "[CUG-BACKBONE]":
+				fallthrough
 			case res.Hops[ttl][i].Geo.Whois == "CMIN2-NET":
 				fallthrough
 			case strings.HasPrefix(res.Hops[ttl][i].Address.String(), "59.43."):
@@ -98,7 +116,13 @@ func RealtimePrinter(res *trace.Result, ttl int) {
 			}
 
 			if whoisFormat[0] != "" {
-				whoisFormat[0] = "[" + whoisFormat[0] + "]"
+				//如果以RFC或DOD开头那么为空
+				if !(strings.HasPrefix(whoisFormat[0], "RFC") ||
+					strings.HasPrefix(whoisFormat[0], "DOD")) {
+					whoisFormat[0] = "[" + whoisFormat[0] + "]"
+				} else {
+					whoisFormat[0] = ""
+				}
 			}
 
 			// CMIN2, CUII, CN2, CUG 改为壕金色高亮
@@ -112,6 +136,8 @@ func RealtimePrinter(res *trace.Result, ttl int) {
 			case res.Hops[ttl][i].Geo.Asnumber == "9929":
 				fallthrough
 			case res.Hops[ttl][i].Geo.Asnumber == "23764":
+				fallthrough
+			case whoisFormat[0] == "[CTG-CN]":
 				fallthrough
 			case whoisFormat[0] == "[CNC-BACKBONE]":
 				fallthrough
@@ -159,6 +185,11 @@ func RealtimePrinter(res *trace.Result, ttl int) {
 					color.New(color.FgHiCyan, color.Bold).Sprintf("%s", v[j]),
 				)
 			}
+		}
+		for _, v := range res.Hops[ttl][i].MPLS {
+			fmt.Fprintf(color.Output, "%s",
+				color.New(color.FgHiBlack, color.Bold).Sprintf("\n    %s", v),
+			)
 		}
 		fmt.Println()
 		blockDisplay = true
