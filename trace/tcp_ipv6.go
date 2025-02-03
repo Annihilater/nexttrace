@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/xgadget-lab/nexttrace/util"
+	"github.com/nxtrace/NTrace-core/util"
 	"golang.org/x/net/context"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv6"
@@ -31,7 +31,8 @@ type TCPTracerv6 struct {
 	final     int
 	finalLock sync.Mutex
 
-	sem *semaphore.Weighted
+	sem       *semaphore.Weighted
+	fetchLock sync.Mutex
 }
 
 func (t *TCPTracerv6) Execute() (*Result, error) {
@@ -46,7 +47,7 @@ func (t *TCPTracerv6) Execute() (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	t.icmp, err = icmp.ListenPacket("ip6:58", "::")
+	t.icmp, err = icmp.ListenPacket("ip6:ipv6-icmp", "::")
 	if err != nil {
 		return &t.res, err
 	}
@@ -63,7 +64,7 @@ func (t *TCPTracerv6) Execute() (*Result, error) {
 
 	t.sem = semaphore.NewWeighted(int64(t.ParallelRequests))
 
-	for ttl := 1; ttl <= t.MaxHops; ttl++ {
+	for ttl := t.BeginHop; ttl <= t.MaxHops; ttl++ {
 		// 如果到达最终跳，则退出
 		if t.final != -1 && ttl > t.final {
 			break
@@ -71,14 +72,14 @@ func (t *TCPTracerv6) Execute() (*Result, error) {
 		for i := 0; i < t.NumMeasurements; i++ {
 			t.wg.Add(1)
 			go t.send(ttl)
+			<-time.After(time.Millisecond * time.Duration(t.Config.PacketInterval))
 		}
 		if t.RealtimePrinter != nil {
 			// 对于实时模式，应该按照TTL进行并发请求
 			t.wg.Wait()
 			t.RealtimePrinter(&t.res, ttl-1)
 		}
-		time.Sleep(1 * time.Millisecond)
-
+		<-time.After(time.Millisecond * time.Duration(t.Config.TTLInterval))
 	}
 
 	go func() {
@@ -223,11 +224,23 @@ func (t *TCPTracerv6) send(ttl int) error {
 		ComputeChecksums: true,
 		FixLengths:       true,
 	}
-	if err := gopacket.SerializeLayers(buf, opts, tcpHeader); err != nil {
+
+	desiredPayloadSize := t.Config.PktSize
+	payload := make([]byte, desiredPayloadSize)
+	// 设置随机种子
+	rand.Seed(time.Now().UnixNano())
+
+	// 填充随机数
+	for i := range payload {
+		payload[i] = byte(rand.Intn(256))
+	}
+	//copy(buf.Bytes(), payload)
+
+	if err := gopacket.SerializeLayers(buf, opts, tcpHeader, gopacket.Payload(payload)); err != nil {
 		return err
 	}
 
-	ipv6.NewPacketConn(t.tcp).SetHopLimit(ttl)
+	err = ipv6.NewPacketConn(t.tcp).SetHopLimit(ttl)
 	if err != nil {
 		return err
 	}
@@ -238,7 +251,7 @@ func (t *TCPTracerv6) send(ttl int) error {
 	}
 	// log.Println(ttl, sequenceNumber)
 	t.inflightRequestLock.Lock()
-	hopCh := make(chan Hop)
+	hopCh := make(chan Hop, 1)
 	t.inflightRequest[int(sequenceNumber)] = hopCh
 	t.inflightRequestLock.Unlock()
 
@@ -268,6 +281,8 @@ func (t *TCPTracerv6) send(ttl int) error {
 		h.TTL = ttl
 		h.RTT = rtt
 
+		t.fetchLock.Lock()
+		defer t.fetchLock.Unlock()
 		h.fetchIPData(t.Config)
 
 		t.res.add(h)

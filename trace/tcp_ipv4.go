@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/xgadget-lab/nexttrace/util"
+	"github.com/nxtrace/NTrace-core/util"
 	"golang.org/x/net/context"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -31,7 +31,8 @@ type TCPTracer struct {
 	final     int
 	finalLock sync.Mutex
 
-	sem *semaphore.Weighted
+	sem       *semaphore.Weighted
+	fetchLock sync.Mutex
 }
 
 func (t *TCPTracer) Execute() (*Result, error) {
@@ -79,7 +80,7 @@ func (t *TCPTracer) Execute() (*Result, error) {
 		for i := 0; i < t.NumMeasurements; i++ {
 			t.wg.Add(1)
 			go t.send(ttl)
-
+			<-time.After(time.Millisecond * time.Duration(t.Config.PacketInterval))
 		}
 		if t.RealtimePrinter != nil {
 			// 对于实时模式，应该按照TTL进行并发请求
@@ -87,7 +88,7 @@ func (t *TCPTracer) Execute() (*Result, error) {
 			t.RealtimePrinter(&t.res, ttl-1)
 		}
 
-		time.Sleep(1 * time.Millisecond)
+		<-time.After(time.Millisecond * time.Duration(t.Config.TTLInterval))
 	}
 	go func() {
 		if t.AsyncPrinter != nil {
@@ -216,6 +217,10 @@ func (t *TCPTracer) send(ttl int) error {
 		DstIP:    t.DestIP,
 		Protocol: layers.IPProtocolTCP,
 		TTL:      uint8(ttl),
+		//Flags:    layers.IPv4DontFragment, // 我感觉没必要
+	}
+	if t.DontFragment {
+		ipHeader.Flags = layers.IPv4DontFragment
 	}
 	// 使用Uint16兼容32位系统，防止在rand的时候因使用int32而溢出
 	sequenceNumber := uint32(r.Intn(math.MaxUint16))
@@ -233,7 +238,19 @@ func (t *TCPTracer) send(ttl int) error {
 		ComputeChecksums: true,
 		FixLengths:       true,
 	}
-	if err := gopacket.SerializeLayers(buf, opts, tcpHeader); err != nil {
+
+	desiredPayloadSize := t.Config.PktSize
+	payload := make([]byte, desiredPayloadSize)
+	// 设置随机种子
+	rand.Seed(time.Now().UnixNano())
+
+	// 填充随机数
+	for i := range payload {
+		payload[i] = byte(rand.Intn(256))
+	}
+	//copy(buf.Bytes(), payload)
+
+	if err := gopacket.SerializeLayers(buf, opts, tcpHeader, gopacket.Payload(payload)); err != nil {
 		return err
 	}
 
@@ -247,11 +264,11 @@ func (t *TCPTracer) send(ttl int) error {
 		return err
 	}
 	t.inflightRequestLock.Lock()
-	hopCh := make(chan Hop)
+	hopCh := make(chan Hop, 1)
 	t.inflightRequest[int(sequenceNumber)] = hopCh
 	t.inflightRequestLock.Unlock()
 	/*
-		// 这里属于 2个Sender，N个Reciever的情况，在哪里关闭Channel都容易导致Panic
+		// 这里属于 2个Sender，N个Receiver的情况，在哪里关闭Channel都容易导致Panic
 		defer func() {
 			t.inflightRequestLock.Lock()
 			close(hopCh)
@@ -285,7 +302,12 @@ func (t *TCPTracer) send(ttl int) error {
 		h.TTL = ttl
 		h.RTT = rtt
 
-		h.fetchIPData(t.Config)
+		t.fetchLock.Lock()
+		defer t.fetchLock.Unlock()
+		err := h.fetchIPData(t.Config)
+		if err != nil {
+			return err
+		}
 
 		t.res.add(h)
 
